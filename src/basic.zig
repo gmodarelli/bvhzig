@@ -122,7 +122,8 @@ const BasicBVHApp = struct {
         var app: BasicBVHApp = undefined;
         app.root_node_index = 0;
 
-        app.generateRandomTriangleSoup(allocator);
+        // app.generateRandomTriangleSoup(allocator);
+        app.loadTrianglesFromMesh(allocator) catch unreachable;
         app.buildBVH(allocator);
 
         return app;
@@ -154,6 +155,46 @@ const BasicBVHApp = struct {
             triangle.vertex0 = float3Sub(float3MulScalar(r0, 9), .{ 5.0, 5.0, 5.0 });
             triangle.vertex1 = float3Add(triangle.vertex0, r1);
             triangle.vertex2 = float3Add(triangle.vertex0, r2);
+
+            app.triangles.appendAssumeCapacity(triangle);
+        }
+    }
+
+    fn loadTrianglesFromMesh(app: *BasicBVHApp, allocator: std.mem.Allocator) !void {
+        const dir = std.fs.cwd();
+        var file = try dir.openFile("content/unity.tri", .{ .mode = .read_only });
+
+        var reader = file.reader();
+        var buffer: [512]u8 = undefined;
+        app.num_triangles = 0;
+        while (try reader.readUntilDelimiterOrEof(buffer[0..], '\n')) |_| {
+            app.num_triangles += 1;
+        }
+        std.log.debug("Num triangles found in file: {}", .{app.num_triangles});
+        file.close();
+
+        app.triangles = std.ArrayListUnmanaged(Tri).initCapacity(allocator, app.num_triangles) catch unreachable;
+        app.triangle_indices = std.ArrayListUnmanaged(u32).initCapacity(allocator, app.num_triangles) catch unreachable;
+
+        // TODO: Figure out a way to rewind the file reader instead of re-opening the file again
+        file = try dir.openFile("content/unity.tri", .{ .mode = .read_only });
+        defer file.close();
+        reader = file.reader();
+        while (try reader.readUntilDelimiterOrEof(buffer[0..], '\n')) |line| {
+            var it = std.mem.tokenize(u8, line, " ");
+
+            var triangle: Tri = undefined;
+            triangle.vertex0[0] = try std.fmt.parseFloat(f32, it.next().?);
+            triangle.vertex0[1] = try std.fmt.parseFloat(f32, it.next().?);
+            triangle.vertex0[2] = try std.fmt.parseFloat(f32, it.next().?);
+
+            triangle.vertex1[0] = try std.fmt.parseFloat(f32, it.next().?);
+            triangle.vertex1[1] = try std.fmt.parseFloat(f32, it.next().?);
+            triangle.vertex1[2] = try std.fmt.parseFloat(f32, it.next().?);
+
+            triangle.vertex2[0] = try std.fmt.parseFloat(f32, it.next().?);
+            triangle.vertex2[1] = try std.fmt.parseFloat(f32, it.next().?);
+            triangle.vertex2[2] = try std.fmt.parseFloat(f32, it.next().?);
 
             app.triangles.appendAssumeCapacity(triangle);
         }
@@ -314,7 +355,7 @@ pub fn main() anyerror!void {
     const width: u32 = 640;
     const height: u32 = 640;
 
-    var window = c.SDL_CreateWindow("BHV", c.SDL_WINDOWPOS_CENTERED, c.SDL_WINDOWPOS_CENTERED, width, height, 0);
+    var window = c.SDL_CreateWindow("BVH", c.SDL_WINDOWPOS_CENTERED, c.SDL_WINDOWPOS_CENTERED, width, height, 0);
     defer c.SDL_DestroyWindow(window);
 
     var renderer = c.SDL_CreateRenderer(window, 0, c.SDL_RENDERER_PRESENTVSYNC);
@@ -373,32 +414,33 @@ pub fn main() anyerror!void {
         // Clear surface
         _ = c.SDL_FillRect(surface, null, c.SDL_MapRGB(surface.*.format, 0, 0, 0));
 
-        const p0: [3]f32 = .{ -1, 1, -15 };
-        const p1: [3]f32 = .{ 1, 1, -15 };
-        const p2: [3]f32 = .{ -1, -1, -15 };
+        const p0: [3]f32 = .{ -1, 1, 2 };
+        const p1: [3]f32 = .{ 1, 1, 2 };
+        const p2: [3]f32 = .{ -1, -1, 2 };
         var ray: Ray = undefined;
-        ray.origin = .{ 0, 0, -18 };
+        ray.origin = .{ -1.5, -0.2, -2.5 };
 
         const start = std.time.milliTimestamp();
 
         var y: u32 = 0;
+        const inv_far_plane: f32 = 1.0 / 5.0;
+
         while (y < height) : (y += 1) {
             var x: u32 = 0;
             while (x < width) : (x += 1) {
-                const pixel_pos = calculatePixelPosition(p0, p1, p2, x, y, width, height);
+                const pixel_pos = calculatePixelPosition(ray.origin, p0, p1, p2, x, y, width, height);
                 ray.direction = float3Normalize(float3Sub(pixel_pos, ray.origin));
                 ray.t = 1.0e+30;
-
-                // Intersect every single triangle
-                // var i: u32 = 0;
-                // while (i < num_triangles) : (i += 1) {
-                //     intersectTri(&ray, &bvh_app.triangles[i]);
-                // }
 
                 bvh_app.intersectBVH(&ray, bvh_app.root_node_index);
 
                 if (ray.t < 1.0e+30) {
-                    setPixelColor(surface, x, y, 0xffffffff);
+                    var d = @floatToInt(u32, (1.0 - ray.t * inv_far_plane) * 255.99);
+                    var color: u32 = 0xff000000;
+                    color |= d << 0;
+                    color |= d << 8;
+                    color |= d << 16;
+                    setPixelColor(surface, x, y, color);
                 }
             }
         }
@@ -415,10 +457,10 @@ pub fn main() anyerror!void {
     }
 }
 
-fn calculatePixelPosition(p0: [3]f32, p1: [3]f32, p2: [3]f32, x: u32, y: u32, width: u32, height: u32) [3]f32 {
-    return float3Add(p0, float3Add(
+fn calculatePixelPosition(origin: [3]f32, p0: [3]f32, p1: [3]f32, p2: [3]f32, x: u32, y: u32, width: u32, height: u32) [3]f32 {
+    return float3Add(origin, float3Add(p0, float3Add(
         float3MulScalar(float3Sub(p1, p0), (@intToFloat(f32, x) / @intToFloat(f32, width))),
-        float3MulScalar(float3Sub(p2, p0), @intToFloat(f32, y) / @intToFloat(f32, height))));
+        float3MulScalar(float3Sub(p2, p0), @intToFloat(f32, y) / @intToFloat(f32, height)))));
 }
 
 fn setPixelColor(surface: *c.SDL_Surface, x: u32, y: u32, pixel: u32) void {
