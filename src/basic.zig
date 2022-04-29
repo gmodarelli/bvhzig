@@ -63,6 +63,54 @@ const Ray = struct {
     t: f32 = 1.0e+30,
 };
 
+pub fn intersectTri(ray: *Ray, tri: *const Tri) void {
+    const edge1 = float3Sub(tri.vertex1, tri.vertex0);
+    const edge2 = float3Sub(tri.vertex2, tri.vertex0);
+    const h = float3Cross(ray.direction, edge2);
+    const a = float3Dot(edge1, h);
+    if (a > -0.0001 and a < 0.0001) { // Ray parallel to triangle
+        return;
+    }
+
+    const f: f32 = 1.0 / a;
+    const s = float3Sub(ray.origin, tri.vertex0);
+    const u = f * float3Dot(s, h);
+    if (u < 0 or u > 1) {
+        return;
+    }
+
+    const q = float3Cross(s, edge1);
+    const v = f * float3Dot(ray.direction, q);
+    if (v < 0 or u + v > 1) {
+        return;
+    }
+
+    const t = f * float3Dot(edge2, q);
+    if (t > 0.0001) {
+        ray.t = math.min(ray.t, t);
+    }
+}
+
+pub fn intersectAABB(ray: *Ray, bmin: [3]f32, bmax: [3]f32) bool {
+    var tx1: f32 = (bmin[0] - ray.origin[0]) / ray.direction[0];
+    var tx2: f32 = (bmax[0] - ray.origin[0]) / ray.direction[0];
+    var tmin: f32 = math.min(tx1, tx2);
+    var tmax: f32 = math.max(tx1, tx2);
+
+    var ty1: f32 = (bmin[1] - ray.origin[1]) / ray.direction[1];
+    var ty2: f32 = (bmax[1] - ray.origin[1]) / ray.direction[1];
+    tmin = math.max(tmin, math.min(ty1, ty2));
+    tmax = math.min(tmax, math.max(ty1, ty2));
+
+    var tz1: f32 = (bmin[2] - ray.origin[2]) / ray.direction[2];
+    var tz2: f32 = (bmax[2] - ray.origin[2]) / ray.direction[2];
+    tmin = math.max(tmin, math.min(tz1, tz2));
+    tmax = math.min(tmax, math.max(tz1, tz2));
+
+    return tmax >= tmin and tmin < ray.t and tmax > 0;
+}
+
+
 const BasicBVHApp = struct {
     num_triangles: u32 = 0,
     triangles: std.ArrayListUnmanaged(Tri),
@@ -111,63 +159,16 @@ const BasicBVHApp = struct {
         }
     }
 
-    pub fn intersectTri(_: *BasicBVHApp, ray: *Ray, tri: *const Tri) void {
-        const edge1 = float3Sub(tri.vertex1, tri.vertex0);
-        const edge2 = float3Sub(tri.vertex2, tri.vertex0);
-        const h = float3Cross(ray.direction, edge2);
-        const a = float3Dot(edge1, h);
-        if (a > -0.0001 and a < 0.0001) { // Ray parallel to triangle
-            return;
-        }
-
-        const f: f32 = 1.0 / a;
-        const s = float3Sub(ray.origin, tri.vertex0);
-        const u = f * float3Dot(s, h);
-        if (u < 0 or u > 1) {
-            return;
-        }
-
-        const q = float3Cross(s, edge1);
-        const v = f * float3Dot(ray.direction, q);
-        if (v < 0 or u + v > 1) {
-            return;
-        }
-
-        const t = f * float3Dot(edge2, q);
-        if (t > 0.0001) {
-            ray.t = math.min(ray.t, t);
-        }
-    }
-
-    pub fn intersectAABB(_: *BasicBVHApp, ray: *Ray, bmin: [3]f32, bmax: [3]f32) bool {
-        var tx1: f32 = (bmin[0] - ray.origin[0]) / ray.direction[0];
-        var tx2: f32 = (bmax[0] - ray.origin[0]) / ray.direction[0];
-        var tmin: f32 = math.min(tx1, tx2);
-        var tmax: f32 = math.max(tx1, tx2);
-
-        var ty1: f32 = (bmin[1] - ray.origin[1]) / ray.direction[1];
-        var ty2: f32 = (bmax[1] - ray.origin[1]) / ray.direction[1];
-        tmin = math.max(tmin, math.min(ty1, ty2));
-        tmax = math.min(tmax, math.max(ty1, ty2));
-
-        var tz1: f32 = (bmin[2] - ray.origin[2]) / ray.direction[2];
-        var tz2: f32 = (bmax[2] - ray.origin[2]) / ray.direction[2];
-        tmin = math.max(tmin, math.min(tz1, tz2));
-        tmax = math.min(tmax, math.max(tz1, tz2));
-
-        return tmax >= tmin and tmin < ray.t and tmax > 0;
-    }
-
     pub fn intersectBVH(bvh: *BasicBVHApp, ray: *Ray, node_index: u32) void {
         var node = &bvh.bvh_nodes.items[node_index];
-        if (!bvh.intersectAABB(ray, node.aabb_min, node.aabb_max)) {
+        if (!intersectAABB(ray, node.aabb_min, node.aabb_max)) {
             return;
         }
 
         if (node.is_leaf()) {
             var i: u32 = 0;
             while (i < node.tri_count) : (i += 1) {
-                bvh.intersectTri(ray, &bvh.triangles.items[bvh.triangle_indices.items[node.left_first + i]]);
+                intersectTri(ray, &bvh.triangles.items[bvh.triangle_indices.items[node.left_first + i]]);
             }
         } else {
             bvh.intersectBVH(ray, node.left_first);
@@ -281,7 +282,6 @@ const BasicBVHApp = struct {
             return;
         }
 
-
         // Create child nodes
         const left_child_idx: u32 = @intCast(u32, app.bvh_nodes.items.len);
         var left_child_node: BVHNode = undefined;
@@ -392,7 +392,7 @@ pub fn main() anyerror!void {
                 // Intersect every single triangle
                 // var i: u32 = 0;
                 // while (i < num_triangles) : (i += 1) {
-                //     bvh_app.intersectTri(&ray, &bvh_app.triangles[i]);
+                //     intersectTri(&ray, &bvh_app.triangles[i]);
                 // }
 
                 bvh_app.intersectBVH(&ray, bvh_app.root_node_index);
