@@ -63,37 +63,52 @@ const Ray = struct {
     t: f32 = 1.0e+30,
 };
 
-const num_triangles: u32 = 64;
-
 const BasicBVHApp = struct {
-    triangles: [num_triangles]Tri,
-    triangle_indices: [num_triangles]u32,
-    bvh_node: [num_triangles * 2]BVHNode,
+    num_triangles: u32 = 0,
+    triangles: std.ArrayListUnmanaged(Tri),
+    triangle_indices: std.ArrayListUnmanaged(u32),
+    bvh_nodes: std.ArrayListUnmanaged(BVHNode),
     root_node_index: u32 = 0,
-    node_used: u32 = 1,
 
-    pub fn init() BasicBVHApp {
+    pub fn init(allocator: std.mem.Allocator) BasicBVHApp {
         var app: BasicBVHApp = undefined;
         app.root_node_index = 0;
-        app.node_used = 1;
+
+        app.generateRandomTriangleSoup(allocator);
+        app.buildBVH(allocator);
+
+        return app;
+    }
+
+    pub fn deinit(app: *BasicBVHApp, allocator: std.mem.Allocator) void {
+        app.triangles.deinit(allocator);
+        app.triangle_indices.deinit(allocator);
+        app.bvh_nodes.deinit(allocator);
+    }
+
+    fn generateRandomTriangleSoup(app: *BasicBVHApp, allocator: std.mem.Allocator) void {
+        app.num_triangles = 64;
+
+        app.triangles = std.ArrayListUnmanaged(Tri).initCapacity(allocator, app.num_triangles) catch unreachable;
+        app.triangle_indices = std.ArrayListUnmanaged(u32).initCapacity(allocator, app.num_triangles) catch unreachable;
 
         var prng = std.rand.DefaultPrng.init(0x12345678);
         const random = prng.random();
 
         var i: u32 = 0;
-        while (i < num_triangles) : (i += 1) {
+        while (i < app.num_triangles) : (i += 1) {
             var r0: [3]f32 = .{ random.float(f32), random.float(f32), random.float(f32) };
             var r1: [3]f32 = .{ random.float(f32), random.float(f32), random.float(f32) };
             var r2: [3]f32 = .{ random.float(f32), random.float(f32), random.float(f32) };
+
+            var triangle: Tri = undefined;
         
-            app.triangles[i].vertex0 = float3Sub(float3MulScalar(r0, 9), .{ 5.0, 5.0, 5.0 });
-            app.triangles[i].vertex1 = float3Add(app.triangles[i].vertex0, r1);
-            app.triangles[i].vertex2 = float3Add(app.triangles[i].vertex0, r2);
+            triangle.vertex0 = float3Sub(float3MulScalar(r0, 9), .{ 5.0, 5.0, 5.0 });
+            triangle.vertex1 = float3Add(triangle.vertex0, r1);
+            triangle.vertex2 = float3Add(triangle.vertex0, r2);
+
+            app.triangles.appendAssumeCapacity(triangle);
         }
-
-        app.buildBVH();
-
-        return app;
     }
 
     pub fn intersectTri(_: *BasicBVHApp, ray: *Ray, tri: *const Tri) void {
@@ -144,7 +159,7 @@ const BasicBVHApp = struct {
     }
 
     pub fn intersectBVH(bvh: *BasicBVHApp, ray: *Ray, node_index: u32) void {
-        var node = &bvh.bvh_node[node_index];
+        var node = &bvh.bvh_nodes.items[node_index];
         if (!bvh.intersectAABB(ray, node.aabb_min, node.aabb_max)) {
             return;
         }
@@ -152,7 +167,7 @@ const BasicBVHApp = struct {
         if (node.is_leaf()) {
             var i: u32 = 0;
             while (i < node.tri_count) : (i += 1) {
-                bvh.intersectTri(ray, &bvh.triangles[bvh.triangle_indices[node.left_first + i]]);
+                bvh.intersectTri(ray, &bvh.triangles.items[bvh.triangle_indices.items[node.left_first + i]]);
             }
         } else {
             bvh.intersectBVH(ray, node.left_first);
@@ -160,27 +175,35 @@ const BasicBVHApp = struct {
         }
     }
 
-    fn buildBVH(app: *BasicBVHApp) void {
+    fn buildBVH(app: *BasicBVHApp, allocator: std.mem.Allocator) void {
+        std.debug.assert(app.num_triangles > 0);
+        app.bvh_nodes = std.ArrayListUnmanaged(BVHNode).initCapacity(allocator, app.num_triangles * 2) catch unreachable;
+
+        std.debug.assert(app.num_triangles > 0);
+        std.debug.assert(app.root_node_index == 0);
+
         // Populate triangle index array
         var i: u32 = 0;
-        while (i < num_triangles) : (i += 1) {
-            app.triangle_indices[i] = i;
+        while (i < app.num_triangles) : (i += 1) {
+            app.triangle_indices.appendAssumeCapacity(i);
         }
 
         // Calculate triangle centroids for partitioning
         i = 0;
-        while (i < num_triangles) : (i += 1) {
-            app.triangles[i].centroid = .{
-                (app.triangles[i].vertex0[0] + app.triangles[i].vertex1[0] + app.triangles[i].vertex2[0]) * 0.3333,
-                (app.triangles[i].vertex0[1] + app.triangles[i].vertex1[1] + app.triangles[i].vertex2[1]) * 0.3333,
-                (app.triangles[i].vertex0[2] + app.triangles[i].vertex1[2] + app.triangles[i].vertex2[2]) * 0.3333,
+        while (i < app.num_triangles) : (i += 1) {
+            app.triangles.items[i].centroid = .{
+                (app.triangles.items[i].vertex0[0] + app.triangles.items[i].vertex1[0] + app.triangles.items[i].vertex2[0]) * 0.3333,
+                (app.triangles.items[i].vertex0[1] + app.triangles.items[i].vertex1[1] + app.triangles.items[i].vertex2[1]) * 0.3333,
+                (app.triangles.items[i].vertex0[2] + app.triangles.items[i].vertex1[2] + app.triangles.items[i].vertex2[2]) * 0.3333,
             };
         }
 
         // Assign all triangles to the root node
-        var root = &app.bvh_node[app.root_node_index];
-        root.left_first = 0;
-        root.tri_count = num_triangles;
+        var bvh_node: BVHNode = undefined;
+        bvh_node.left_first = 0;
+        bvh_node.tri_count = app.num_triangles;
+
+        app.bvh_nodes.appendAssumeCapacity(bvh_node);
 
         app.updateNodeBounds(app.root_node_index);
 
@@ -189,7 +212,9 @@ const BasicBVHApp = struct {
     }
 
     fn updateNodeBounds(app: *BasicBVHApp, node_index: u32) void {
-        var node = &app.bvh_node[node_index];
+        std.debug.assert(node_index < app.bvh_nodes.items.len);
+
+        var node = &app.bvh_nodes.items[node_index];
         node.aabb_min = .{ 1.0e+30, 1.0e+30, 1.0e+30 };
         node.aabb_max = .{ -1.0e+30, -1.0e+30, -1.0e+30 };
 
@@ -197,8 +222,8 @@ const BasicBVHApp = struct {
         const first: u32 = node.left_first;
 
         while (i < node.tri_count) : (i += 1) {
-            var left_tri_idx = app.triangle_indices[first + i];
-            const left_tri = app.triangles[left_tri_idx];
+            var left_tri_idx = app.triangle_indices.items[first + i];
+            const left_tri = app.triangles.items[left_tri_idx];
 
             node.aabb_min = float3Min(node.aabb_min, left_tri.vertex0);
             node.aabb_min = float3Min(node.aabb_min, left_tri.vertex1);
@@ -210,8 +235,10 @@ const BasicBVHApp = struct {
     }
 
     fn subdivide(app: *BasicBVHApp, node_index: u32) void {
+        std.debug.assert(node_index < app.bvh_nodes.items.len);
+
         // Terminate recursion
-        var node = &app.bvh_node[node_index];
+        var node = &app.bvh_nodes.items[node_index];
         if (node.tri_count <= 2) {
             return;
         }
@@ -238,12 +265,12 @@ const BasicBVHApp = struct {
         var i: u32 = node.left_first;
         var j: u32 = i + node.tri_count - 1;
         while (i <= j) {
-            if (app.triangles[app.triangle_indices[i]].centroid[axis] < split_pos) {
+            if (app.triangles.items[app.triangle_indices.items[i]].centroid[axis] < split_pos) {
                 i += 1;
             } else {
-                var tmp = app.triangle_indices[i];
-                app.triangle_indices[i] = app.triangle_indices[j];
-                app.triangle_indices[j] = tmp;
+                var tmp = app.triangle_indices.items[i];
+                app.triangle_indices.items[i] = app.triangle_indices.items[j];
+                app.triangle_indices.items[j] = tmp;
                 j -= 1;
             }
         }
@@ -254,16 +281,20 @@ const BasicBVHApp = struct {
             return;
         }
 
-        // Create child nodes
-        const left_child_idx: u32 = app.node_used;
-        app.node_used += 1;
-        const right_child_idx: u32 = app.node_used;
-        app.node_used += 1;
 
-        app.bvh_node[left_child_idx].left_first = node.left_first;
-        app.bvh_node[left_child_idx].tri_count = left_count;
-        app.bvh_node[right_child_idx].left_first = i;
-        app.bvh_node[right_child_idx].tri_count = node.tri_count - left_count;
+        // Create child nodes
+        const left_child_idx: u32 = @intCast(u32, app.bvh_nodes.items.len);
+        var left_child_node: BVHNode = undefined;
+        left_child_node.left_first = node.left_first;
+        left_child_node.tri_count = left_count;
+        app.bvh_nodes.appendAssumeCapacity(left_child_node);
+
+        const right_child_idx: u32 = @intCast(u32, app.bvh_nodes.items.len);
+        var right_child_node: BVHNode = undefined;
+        right_child_node.left_first = i;
+        right_child_node.tri_count = node.tri_count - left_count;
+        app.bvh_nodes.appendAssumeCapacity(right_child_node);
+
         node.left_first = left_child_idx;
         node.tri_count = 0;
 
@@ -320,7 +351,12 @@ pub fn main() anyerror!void {
     texture_rect.w = width;
     texture_rect.h = height;
 
-    var bvh_app = BasicBVHApp.init();
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var bvh_app = BasicBVHApp.init(allocator);
+    defer bvh_app.deinit(allocator);
 
     mainloop: while (true) {
         var sdl_event: c.SDL_Event = undefined;
@@ -353,7 +389,7 @@ pub fn main() anyerror!void {
                 ray.direction = float3Normalize(float3Sub(pixel_pos, ray.origin));
                 ray.t = 1.0e+30;
 
-                // Interset every single triangle
+                // Intersect every single triangle
                 // var i: u32 = 0;
                 // while (i < num_triangles) : (i += 1) {
                 //     bvh_app.intersectTri(&ray, &bvh_app.triangles[i]);
