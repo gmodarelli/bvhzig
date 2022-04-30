@@ -1,4 +1,5 @@
 const std = @import("std");
+const ztracy = @import("3rdparty/ztracy/build.zig");
 
 const content_dir = "content/";
 
@@ -13,9 +14,19 @@ pub fn build(b: *std.build.Builder) void {
     // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall.
     const mode = b.standardReleaseOptions();
 
+    const enable_tracy = b.option(bool, "enable-tracy", "Enable Tracy profiler") orelse false;
+
+    const exe_options = b.addOptions();
+    exe_options.addOption(bool, "enable_tracy", enable_tracy);
+
     const exe = b.addExecutable("basic", "src/basic.zig");
     exe.setTarget(target);
     exe.setBuildMode(mode);
+    exe.addOptions("build_options", exe_options);
+
+    const options_pkg = exe_options.getPackage("build_options");
+    exe.addPackage(ztracy.getPkg(b, options_pkg));
+    ztracy.link(exe, enable_tracy);
 
     const install_content_step = b.addInstallDirectory(.{
         .source_dir = thisDir() ++ "/" ++ content_dir,
