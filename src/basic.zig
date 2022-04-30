@@ -14,13 +14,6 @@ fn print(comptime format: []const u8, args: anytype) void {
     nosuspend stderr.print(format ++ "\n", args) catch return;
 }
 
-const Tri = struct {
-    vertex0: [3]f32,
-    vertex1: [3]f32,
-    vertex2: [3]f32,
-    centroid: [3]f32,
-};
-
 fn float3Min(a: [3]f32, b: [3]f32) [3]f32 {
     return .{ math.min(a[0], b[0]), math.min(a[1], b[1]), math.min(a[2], b[2]) };
 }
@@ -53,6 +46,13 @@ fn float3Normalize(v: [3]f32) [3]f32 {
     const inv_length: f32 = 1.0 / math.sqrt(float3Dot(v, v));
     return float3MulScalar(v, inv_length);
 }
+
+const Tri = struct {
+    vertex0: [3]f32,
+    vertex1: [3]f32,
+    vertex2: [3]f32,
+    centroid: [3]f32,
+};
 
 const BVHNode = struct {
     aabb_min: [3]f32,
@@ -94,11 +94,25 @@ const AABB = struct {
         aabb.max = float3Max(aabb.max, p);
     }
 
+    pub fn growWithAABB(aabb: *AABB, other: *AABB) void {
+        if (other.min[0] != 1.0e+30) {
+            aabb.grow(other.min);
+            aabb.grow(other.max);
+        }
+    }
+
     pub fn area(aabb: *AABB) f32 {
         const e: [3]f32 = float3Sub(aabb.max, aabb.min);
         return e[0] * e[1] + e[1] * e[2] + e[2] * e[0];
     }
 };
+
+const Bin = struct {
+    bounds: AABB,
+    tri_count: u32,
+};
+
+const num_bins: u32 = 8;
 
 pub fn intersectTri(ray: *Ray, tri: *const Tri) void {
     const edge1 = float3Sub(tri.vertex1, tri.vertex0);
@@ -432,16 +446,68 @@ const BasicBVHApp = struct {
         var best_cost: f32 = 1.0e+30;
         var a: u32 = 0;
         while (a < 3) : (a += 1) {
+            var bounds_min: f32 = 1.0e+30;
+            var bounds_max: f32 = -1.0e+30;
             var i: u32 = 0;
             while (i < node.tri_count) : (i += 1) {
                 const triangle = &app.triangles[app.triangle_indices[node.left_first + i]];
-                const candidate_pos = triangle.centroid[a];
-                var cost: f32 = app.evaluateSAH(node, a, candidate_pos);
+                bounds_min = std.math.min(bounds_min, triangle.centroid[a]);
+                bounds_max = std.math.max(bounds_max, triangle.centroid[a]);
+            }
 
-                if (cost < best_cost) {
-                    split_pos.* = candidate_pos;
+            if (bounds_min == bounds_max) {
+                continue;
+            }
+
+            var bin: [num_bins]Bin = undefined;
+            i = 0;
+            while (i < num_bins) : (i += 1) {
+                bin[i].tri_count = 0;
+                bin[i].bounds = AABB.init();
+            }
+
+            var scale = @intToFloat(f32, num_bins) / (bounds_max - bounds_min);
+            i = 0;
+            while (i < node.tri_count) : (i += 1) {
+                const triangle = &app.triangles[app.triangle_indices[node.left_first + i]];
+                const bin_index: u32 = std.math.min(num_bins - 1, @floatToInt(u32, (triangle.centroid[a] - bounds_min) * scale));
+                bin[bin_index].tri_count += 1;
+                bin[bin_index].bounds.grow(triangle.vertex0);
+                bin[bin_index].bounds.grow(triangle.vertex1);
+                bin[bin_index].bounds.grow(triangle.vertex2);
+            }
+
+            // Gather data for the num_bins - 1 planes between the num_bins bins
+            var left_area: [num_bins - 1]f32 = undefined;
+            var right_area: [num_bins - 1]f32 = undefined;
+            var left_count: [num_bins - 1]u32 = undefined;
+            var right_count: [num_bins - 1]u32 = undefined;
+            var left_box = AABB.init();
+            var right_box = AABB.init();
+            var left_sum: u32 = 0;
+            var right_sum: u32 = 0;
+            i = 0;
+            while (i < num_bins - 1) : (i += 1) {
+                left_sum += bin[i].tri_count;
+                left_count[i] = left_sum;
+                left_box.growWithAABB(&bin[i].bounds);
+                left_area[i] = left_box.area();
+
+                right_sum += bin[num_bins - 1 - i].tri_count;
+                right_count[num_bins - 2 - i] = right_sum;
+                right_box.growWithAABB(&bin[num_bins - 1 - i].bounds);
+                right_area[num_bins - 2 - i] = right_box.area();
+            }
+
+            // Calculate SAH costs for num_bins - 1 planes
+            scale = (bounds_max - bounds_min) / @intToFloat(f32, num_bins);
+            i = 0;
+            while (i < num_bins - 1) : (i += 1) {
+                const plane_cost = @intToFloat(f32, left_count[i]) * left_area[i] + @intToFloat(f32, right_count[i]) * right_area[i];
+                if (plane_cost < best_cost) {
                     axis.* = a;
-                    best_cost = cost;
+                    split_pos.* = bounds_min + scale * @intToFloat(f32, i + 1);
+                    best_cost = plane_cost;
                 }
             }
         }
