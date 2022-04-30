@@ -1,4 +1,5 @@
 const std = @import("std");
+const ztracy = @import("ztracy");
 const endianness = @import("builtin").target.cpu.arch.endian();
 const c = @cImport({
     @cInclude("SDL.h");
@@ -60,7 +61,30 @@ const BVHNode = struct {
 const Ray = struct {
     origin: [3]f32,
     direction: [3]f32,
+    r_direction: [3]f32,
     t: f32 = 1.0e+30,
+};
+
+const AABB = struct {
+    min: [3]f32,
+    max: [3]f32,
+
+    pub fn init() AABB {
+        return .{
+            .min = .{ 1.0e+30, 1.0e+30, 1.0e+30 },
+            .max = .{ -1.0e+30, -1.0e+30, -1.0e+30 },
+        };
+    }
+
+    pub fn grow(aabb: *AABB, p: [3]f32) void {
+        aabb.min = float3Min(aabb.min, p);
+        aabb.max = float3Max(aabb.max, p);
+    }
+
+    pub fn area(aabb: *AABB) f32 {
+        const e: [3]f32 = float3Sub(aabb.max, aabb.min);
+        return e[0] * e[1] + e[1] * e[2] + e[2] * e[0];
+    }
 };
 
 pub fn intersectTri(ray: *Ray, tri: *const Tri) void {
@@ -91,36 +115,42 @@ pub fn intersectTri(ray: *Ray, tri: *const Tri) void {
     }
 }
 
-pub fn intersectAABB(ray: *Ray, bmin: [3]f32, bmax: [3]f32) bool {
-    var tx1: f32 = (bmin[0] - ray.origin[0]) / ray.direction[0];
-    var tx2: f32 = (bmax[0] - ray.origin[0]) / ray.direction[0];
+pub fn intersectAABB(ray: *Ray, bmin: [3]f32, bmax: [3]f32) f32 {
+    var tx1: f32 = (bmin[0] - ray.origin[0]) * ray.r_direction[0];
+    var tx2: f32 = (bmax[0] - ray.origin[0]) * ray.r_direction[0];
     var tmin: f32 = math.min(tx1, tx2);
     var tmax: f32 = math.max(tx1, tx2);
 
-    var ty1: f32 = (bmin[1] - ray.origin[1]) / ray.direction[1];
-    var ty2: f32 = (bmax[1] - ray.origin[1]) / ray.direction[1];
+    var ty1: f32 = (bmin[1] - ray.origin[1]) * ray.r_direction[1];
+    var ty2: f32 = (bmax[1] - ray.origin[1]) * ray.r_direction[1];
     tmin = math.max(tmin, math.min(ty1, ty2));
     tmax = math.min(tmax, math.max(ty1, ty2));
 
-    var tz1: f32 = (bmin[2] - ray.origin[2]) / ray.direction[2];
-    var tz2: f32 = (bmax[2] - ray.origin[2]) / ray.direction[2];
+    var tz1: f32 = (bmin[2] - ray.origin[2]) * ray.r_direction[2];
+    var tz2: f32 = (bmax[2] - ray.origin[2]) * ray.r_direction[2];
     tmin = math.max(tmin, math.min(tz1, tz2));
     tmax = math.min(tmax, math.max(tz1, tz2));
 
-    return tmax >= tmin and tmin < ray.t and tmax > 0;
+    if (tmax >= tmin and tmin < ray.t and tmax > 0) {
+        return tmin;
+    }
+
+    return 1.0e+30;
 }
 
 
 const BasicBVHApp = struct {
     num_triangles: u32 = 0,
-    triangles: std.ArrayListUnmanaged(Tri),
-    triangle_indices: std.ArrayListUnmanaged(u32),
-    bvh_nodes: std.ArrayListUnmanaged(BVHNode),
+    triangles: []Tri,
+    triangle_indices: []u32,
+    bvh_nodes: []BVHNode,
     root_node_index: u32 = 0,
+    node_used: u32 = 1,
 
     pub fn init(allocator: std.mem.Allocator) BasicBVHApp {
         var app: BasicBVHApp = undefined;
         app.root_node_index = 0;
+        app.node_used = 1;
 
         // app.generateRandomTriangleSoup(allocator);
         app.loadTrianglesFromMesh(allocator) catch unreachable;
@@ -130,16 +160,16 @@ const BasicBVHApp = struct {
     }
 
     pub fn deinit(app: *BasicBVHApp, allocator: std.mem.Allocator) void {
-        app.triangles.deinit(allocator);
-        app.triangle_indices.deinit(allocator);
-        app.bvh_nodes.deinit(allocator);
+        allocator.free(app.triangles);
+        allocator.free(app.triangle_indices);
+        allocator.free(app.bvh_nodes);
     }
 
     fn generateRandomTriangleSoup(app: *BasicBVHApp, allocator: std.mem.Allocator) void {
         app.num_triangles = 64;
 
-        app.triangles = std.ArrayListUnmanaged(Tri).initCapacity(allocator, app.num_triangles) catch unreachable;
-        app.triangle_indices = std.ArrayListUnmanaged(u32).initCapacity(allocator, app.num_triangles) catch unreachable;
+        app.triangles = allocator.alloc(Tri, app.num_triangles) catch unreachable;
+        app.triangle_indices = allocator.alloc(u32, app.num_triangles) catch unreachable;
 
         var prng = std.rand.DefaultPrng.init(0x12345678);
         const random = prng.random();
@@ -156,7 +186,7 @@ const BasicBVHApp = struct {
             triangle.vertex1 = float3Add(triangle.vertex0, r1);
             triangle.vertex2 = float3Add(triangle.vertex0, r2);
 
-            app.triangles.appendAssumeCapacity(triangle);
+            app.triangles[i] = triangle;
         }
     }
 
@@ -173,13 +203,14 @@ const BasicBVHApp = struct {
         std.log.debug("Num triangles found in file: {}", .{app.num_triangles});
         file.close();
 
-        app.triangles = std.ArrayListUnmanaged(Tri).initCapacity(allocator, app.num_triangles) catch unreachable;
-        app.triangle_indices = std.ArrayListUnmanaged(u32).initCapacity(allocator, app.num_triangles) catch unreachable;
+        app.triangles = allocator.alloc(Tri, app.num_triangles) catch unreachable;
+        app.triangle_indices = allocator.alloc(u32, app.num_triangles) catch unreachable;
 
         // TODO: Figure out a way to rewind the file reader instead of re-opening the file again
         file = try dir.openFile("content/unity.tri", .{ .mode = .read_only });
         defer file.close();
         reader = file.reader();
+        var i: u32 = 0;
         while (try reader.readUntilDelimiterOrEof(buffer[0..], '\n')) |line| {
             var it = std.mem.tokenize(u8, line, " ");
 
@@ -196,56 +227,91 @@ const BasicBVHApp = struct {
             triangle.vertex2[1] = try std.fmt.parseFloat(f32, it.next().?);
             triangle.vertex2[2] = try std.fmt.parseFloat(f32, it.next().?);
 
-            app.triangles.appendAssumeCapacity(triangle);
+            app.triangles[i] = triangle;
+            i += 1;
         }
     }
 
     pub fn intersectBVH(bvh: *BasicBVHApp, ray: *Ray, node_index: u32) void {
-        var node = &bvh.bvh_nodes.items[node_index];
-        if (!intersectAABB(ray, node.aabb_min, node.aabb_max)) {
-            return;
-        }
+        var node = &bvh.bvh_nodes[node_index];
+        var stack: [64]*BVHNode = undefined;
 
-        if (node.is_leaf()) {
-            var i: u32 = 0;
-            while (i < node.tri_count) : (i += 1) {
-                intersectTri(ray, &bvh.triangles.items[bvh.triangle_indices.items[node.left_first + i]]);
+        var stack_ptr: u32 = 0;
+        while (true) {
+            if (node.is_leaf()) {
+                var i: u32 = 0;
+                while (i < node.tri_count) : (i += 1) {
+                    intersectTri(ray, &bvh.triangles[bvh.triangle_indices[node.left_first + i]]);
+                }
+
+                if (stack_ptr == 0) {
+                    break;
+                } else {
+                    stack_ptr -= 1;
+                    node = stack[stack_ptr];
+                    continue;
+                }
             }
-        } else {
-            bvh.intersectBVH(ray, node.left_first);
-            bvh.intersectBVH(ray, node.left_first + 1);
+
+            var child1 = &bvh.bvh_nodes[node.left_first];
+            var child2 = &bvh.bvh_nodes[node.left_first + 1];
+            var dist1 = intersectAABB(ray, child1.aabb_min, child1.aabb_max);
+            var dist2 = intersectAABB(ray, child2.aabb_min, child2.aabb_max);
+            if (dist1 > dist2) {
+                var tmp_dist = dist1;
+                dist1 = dist2;
+                dist2 = tmp_dist;
+
+                var tmp_child = child1;
+                child1 = child2;
+                child2 = tmp_child;
+            }
+
+            if (dist1 == 1.0e+30) {
+                if (stack_ptr == 0) {
+                    break;
+                } else {
+                    stack_ptr -= 1;
+                    node = stack[stack_ptr];
+                }
+            } else {
+                node = child1;
+                if (dist2 != 1.0e+30) {
+                    stack[stack_ptr] = child2;
+                    stack_ptr += 1;
+                }
+            }
         }
     }
 
     fn buildBVH(app: *BasicBVHApp, allocator: std.mem.Allocator) void {
         std.debug.assert(app.num_triangles > 0);
-        app.bvh_nodes = std.ArrayListUnmanaged(BVHNode).initCapacity(allocator, app.num_triangles * 2) catch unreachable;
+        app.bvh_nodes = allocator.alloc(BVHNode, app.num_triangles * 2) catch unreachable;
 
         std.debug.assert(app.num_triangles > 0);
         std.debug.assert(app.root_node_index == 0);
+        std.debug.assert(app.node_used == 1);
 
         // Populate triangle index array
         var i: u32 = 0;
         while (i < app.num_triangles) : (i += 1) {
-            app.triangle_indices.appendAssumeCapacity(i);
+            app.triangle_indices[i] = i;
         }
 
         // Calculate triangle centroids for partitioning
         i = 0;
         while (i < app.num_triangles) : (i += 1) {
-            app.triangles.items[i].centroid = .{
-                (app.triangles.items[i].vertex0[0] + app.triangles.items[i].vertex1[0] + app.triangles.items[i].vertex2[0]) * 0.3333,
-                (app.triangles.items[i].vertex0[1] + app.triangles.items[i].vertex1[1] + app.triangles.items[i].vertex2[1]) * 0.3333,
-                (app.triangles.items[i].vertex0[2] + app.triangles.items[i].vertex1[2] + app.triangles.items[i].vertex2[2]) * 0.3333,
+            app.triangles[i].centroid = .{
+                (app.triangles[i].vertex0[0] + app.triangles[i].vertex1[0] + app.triangles[i].vertex2[0]) * 0.3333,
+                (app.triangles[i].vertex0[1] + app.triangles[i].vertex1[1] + app.triangles[i].vertex2[1]) * 0.3333,
+                (app.triangles[i].vertex0[2] + app.triangles[i].vertex1[2] + app.triangles[i].vertex2[2]) * 0.3333,
             };
         }
 
         // Assign all triangles to the root node
-        var bvh_node: BVHNode = undefined;
+        var bvh_node = &app.bvh_nodes[app.root_node_index];
         bvh_node.left_first = 0;
         bvh_node.tri_count = app.num_triangles;
-
-        app.bvh_nodes.appendAssumeCapacity(bvh_node);
 
         app.updateNodeBounds(app.root_node_index);
 
@@ -254,9 +320,9 @@ const BasicBVHApp = struct {
     }
 
     fn updateNodeBounds(app: *BasicBVHApp, node_index: u32) void {
-        std.debug.assert(node_index < app.bvh_nodes.items.len);
+        std.debug.assert(node_index < app.node_used);
 
-        var node = &app.bvh_nodes.items[node_index];
+        var node = &app.bvh_nodes[node_index];
         node.aabb_min = .{ 1.0e+30, 1.0e+30, 1.0e+30 };
         node.aabb_max = .{ -1.0e+30, -1.0e+30, -1.0e+30 };
 
@@ -264,8 +330,8 @@ const BasicBVHApp = struct {
         const first: u32 = node.left_first;
 
         while (i < node.tri_count) : (i += 1) {
-            var left_tri_idx = app.triangle_indices.items[first + i];
-            const left_tri = app.triangles.items[left_tri_idx];
+            var left_tri_idx = app.triangle_indices[first + i];
+            const left_tri = app.triangles[left_tri_idx];
 
             node.aabb_min = float3Min(node.aabb_min, left_tri.vertex0);
             node.aabb_min = float3Min(node.aabb_min, left_tri.vertex1);
@@ -277,42 +343,54 @@ const BasicBVHApp = struct {
     }
 
     fn subdivide(app: *BasicBVHApp, node_index: u32) void {
-        std.debug.assert(node_index < app.bvh_nodes.items.len);
+        std.debug.assert(node_index < app.node_used);
+        var node = &app.bvh_nodes[node_index];
 
-        // Terminate recursion
-        var node = &app.bvh_nodes.items[node_index];
-        if (node.tri_count <= 2) {
+        // Determine split axis using SAH
+        var best_axis: u32 = 0xffffffff;
+        var best_pos: f32 = 0;
+        var best_cost: f32 = 1.0e+30;
+        var axis: u32 = 0;
+        while (axis < 3) : (axis += 1) {
+            var i: u32 = 0;
+            while (i < node.tri_count) : (i += 1) {
+                const triangle = &app.triangles[app.triangle_indices[node.left_first + i]];
+                const candidate_pos = triangle.centroid[axis];
+                var cost: f32 = app.evaluateSAH(node, axis, candidate_pos);
+
+                if (cost < best_cost) {
+                    best_pos = candidate_pos;
+                    best_axis = axis;
+                    best_cost = cost;
+                }
+            }
+        }
+
+        // Calculate parent cost to terminate recursion
+        const parent_extent = float3Sub(node.aabb_max, node.aabb_min);
+        const parent_area = parent_extent[0] * parent_extent[1] + parent_extent[1] * parent_extent[2] + parent_extent[2] * parent_extent[0];
+        const parent_cost = @intToFloat(f32, node.tri_count) * parent_area;
+
+        if (best_cost >= parent_cost) {
             return;
         }
 
-        // Determine split axis and position
-        const extent: [3]f32 = .{
-            node.aabb_max[0] - node.aabb_min[0],
-            node.aabb_max[1] - node.aabb_min[1],
-            node.aabb_max[2] - node.aabb_min[2],
-        };
+        std.debug.assert(best_axis >= 0 and best_axis < 3);
+        std.debug.assert(best_cost < 1.0e+30);
 
-        var axis: u32 = 0;
-        if (extent[1] > extent[0]) {
-            axis = 1;
-        }
-
-        if (extent[2] > extent[axis]) {
-            axis = 2;
-        }
-
-        const split_pos: f32 = node.aabb_min[axis] + extent[axis] * 0.5;
+        axis = best_axis;
+        var split_pos: f32 = best_pos;
 
         // In-place partition
         var i: u32 = node.left_first;
         var j: u32 = i + node.tri_count - 1;
         while (i <= j) {
-            if (app.triangles.items[app.triangle_indices.items[i]].centroid[axis] < split_pos) {
+            if (app.triangles[app.triangle_indices[i]].centroid[axis] < split_pos) {
                 i += 1;
             } else {
-                var tmp = app.triangle_indices.items[i];
-                app.triangle_indices.items[i] = app.triangle_indices.items[j];
-                app.triangle_indices.items[j] = tmp;
+                var tmp = app.triangle_indices[i];
+                app.triangle_indices[i] = app.triangle_indices[j];
+                app.triangle_indices[j] = tmp;
                 j -= 1;
             }
         }
@@ -324,17 +402,18 @@ const BasicBVHApp = struct {
         }
 
         // Create child nodes
-        const left_child_idx: u32 = @intCast(u32, app.bvh_nodes.items.len);
-        var left_child_node: BVHNode = undefined;
+        const left_child_idx = app.node_used;
+        app.node_used += 1;
+        const right_child_idx = app.node_used;
+        app.node_used += 1;
+
+        var left_child_node = &app.bvh_nodes[left_child_idx];
         left_child_node.left_first = node.left_first;
         left_child_node.tri_count = left_count;
-        app.bvh_nodes.appendAssumeCapacity(left_child_node);
 
-        const right_child_idx: u32 = @intCast(u32, app.bvh_nodes.items.len);
-        var right_child_node: BVHNode = undefined;
+        var right_child_node = &app.bvh_nodes[right_child_idx];
         right_child_node.left_first = i;
         right_child_node.tri_count = node.tri_count - left_count;
-        app.bvh_nodes.appendAssumeCapacity(right_child_node);
 
         node.left_first = left_child_idx;
         node.tri_count = 0;
@@ -345,6 +424,38 @@ const BasicBVHApp = struct {
         // Recourse
         app.subdivide(left_child_idx);
         app.subdivide(right_child_idx);
+    }
+
+    pub fn evaluateSAH(app: *BasicBVHApp, node: *BVHNode, axis: u32, pos: f32) f32 {
+        // Determine triangle counts and bounds for this split candidate
+        var left_box = AABB.init();
+        var right_box = AABB.init();
+        var left_count: u32 = 0;
+        var right_count: u32 = 0;
+
+        var i: u32 = 0;
+        while (i < node.tri_count) : (i += 1) {
+            const triangle = &app.triangles[app.triangle_indices[node.left_first + i]];
+            if (triangle.centroid[axis] < pos) {
+                left_count += 1;
+                left_box.grow(triangle.vertex0);
+                left_box.grow(triangle.vertex1);
+                left_box.grow(triangle.vertex2);
+            } else {
+                right_count += 1;
+                right_box.grow(triangle.vertex0);
+                right_box.grow(triangle.vertex1);
+                right_box.grow(triangle.vertex2);
+            }
+        }
+
+        const cost: f32 = @intToFloat(f32, left_count) * left_box.area() + @intToFloat(f32, right_count) * right_box.area();
+        if (cost > 0)
+        {
+            return cost;
+        }
+
+        return 1.0e+30;
     }
 };
 
@@ -399,7 +510,12 @@ pub fn main() anyerror!void {
     var bvh_app = BasicBVHApp.init(allocator);
     defer bvh_app.deinit(allocator);
 
+    const pixel_loop_marker = "pixel loop";
+    const pixel_color_marker = "pixel set color";
+    const intersect_marker = "intersect BVH";
+
     mainloop: while (true) {
+
         var sdl_event: c.SDL_Event = undefined;
         while (c.SDL_PollEvent(&sdl_event) != 0) {
             switch (sdl_event.type) {
@@ -425,22 +541,33 @@ pub fn main() anyerror!void {
         var y: u32 = 0;
         const inv_far_plane: f32 = 1.0 / 5.0;
 
-        while (y < height) : (y += 1) {
-            var x: u32 = 0;
-            while (x < width) : (x += 1) {
-                const pixel_pos = calculatePixelPosition(ray.origin, p0, p1, p2, x, y, width, height);
-                ray.direction = float3Normalize(float3Sub(pixel_pos, ray.origin));
-                ray.t = 1.0e+30;
+        {
+            const pixels_loop_tracy_zone = ztracy.ZoneNC(@src(), pixel_loop_marker, 0x00_ff_00_00);
+            defer pixels_loop_tracy_zone.End();
 
-                bvh_app.intersectBVH(&ray, bvh_app.root_node_index);
+            while (y < height) : (y += 1) {
+                var x: u32 = 0;
+                while (x < width) : (x += 1) {
+                    const pixel_pos = calculatePixelPosition(ray.origin, p0, p1, p2, x, y, width, height);
+                    ray.direction = float3Normalize(float3Sub(pixel_pos, ray.origin));
+                    ray.r_direction = .{ 1.0 / ray.direction[0], 1.0 / ray.direction[1], 1.0 / ray.direction[2] };
+                    ray.t = 1.0e+30;
 
-                if (ray.t < 1.0e+30) {
-                    var d = @floatToInt(u32, (1.0 - ray.t * inv_far_plane) * 255.99);
-                    var color: u32 = 0xff000000;
-                    color |= d << 0;
-                    color |= d << 8;
-                    color |= d << 16;
-                    setPixelColor(surface, x, y, color);
+                    const intersect_tracy_zone = ztracy.ZoneNC(@src(), intersect_marker, 0x00_00_ff_00);
+                    bvh_app.intersectBVH(&ray, bvh_app.root_node_index);
+                    intersect_tracy_zone.End();
+
+                    if (ray.t < 1.0e+30) {
+                        const pixels_color_tracy_zone = ztracy.ZoneNC(@src(), pixel_color_marker, 0x00_ff_00_00);
+                        defer pixels_color_tracy_zone.End();
+
+                        var d = @floatToInt(u32, (1.0 - ray.t * inv_far_plane) * 255.99);
+                        var color: u32 = 0xff000000;
+                        color |= d << 0;
+                        color |= d << 8;
+                        color |= d << 16;
+                        setPixelColor(surface, x, y, color);
+                    }
                 }
             }
         }
@@ -454,6 +581,7 @@ pub fn main() anyerror!void {
         _ = c.SDL_RenderCopy(renderer, texture, null, &texture_rect);
 
         c.SDL_RenderPresent(renderer);
+        ztracy.FrameMark();
     }
 }
 
