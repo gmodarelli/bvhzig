@@ -7,6 +7,13 @@ const c = @cImport({
 
 const math = std.math;
 
+fn print(comptime format: []const u8, args: anytype) void {
+    std.debug.getStderrMutex().lock();
+    defer std.debug.getStderrMutex().unlock();
+    const stderr = std.io.getStdErr().writer();
+    nosuspend stderr.print(format ++ "\n", args) catch return;
+}
+
 const Tri = struct {
     vertex0: [3]f32,
     vertex1: [3]f32,
@@ -154,7 +161,12 @@ const BasicBVHApp = struct {
 
         // app.generateRandomTriangleSoup(allocator);
         app.loadTrianglesFromMesh(allocator) catch unreachable;
+
+        const start = std.time.milliTimestamp();
         app.buildBVH(allocator);
+        const end = std.time.milliTimestamp();
+        const elapsed: f32 = @intToFloat(f32, end - start);
+        print("BVH build time: {d:.2}ms", .{elapsed});
 
         return app;
     }
@@ -191,6 +203,8 @@ const BasicBVHApp = struct {
     }
 
     fn loadTrianglesFromMesh(app: *BasicBVHApp, allocator: std.mem.Allocator) !void {
+        const start = std.time.milliTimestamp();
+
         const dir = std.fs.cwd();
         var file = try dir.openFile("content/unity.tri", .{ .mode = .read_only });
 
@@ -200,7 +214,6 @@ const BasicBVHApp = struct {
         while (try reader.readUntilDelimiterOrEof(buffer[0..], '\n')) |_| {
             app.num_triangles += 1;
         }
-        std.log.debug("Num triangles found in file: {}", .{app.num_triangles});
         file.close();
 
         app.triangles = allocator.alloc(Tri, app.num_triangles) catch unreachable;
@@ -230,6 +243,9 @@ const BasicBVHApp = struct {
             app.triangles[i] = triangle;
             i += 1;
         }
+        const end = std.time.milliTimestamp();
+        const elapsed: f32 = @intToFloat(f32, end - start);
+        print("Mesh loaded in {d:.2}ms", .{elapsed});
     }
 
     pub fn intersectBVH(bvh: *BasicBVHApp, ray: *Ray, node_index: u32) void {
@@ -545,28 +561,34 @@ pub fn main() anyerror!void {
             const pixels_loop_tracy_zone = ztracy.ZoneNC(@src(), pixel_loop_marker, 0x00_ff_00_00);
             defer pixels_loop_tracy_zone.End();
 
-            while (y < height) : (y += 1) {
+            while (y < height) : (y += 4) {
                 var x: u32 = 0;
-                while (x < width) : (x += 1) {
-                    const pixel_pos = calculatePixelPosition(ray.origin, p0, p1, p2, x, y, width, height);
-                    ray.direction = float3Normalize(float3Sub(pixel_pos, ray.origin));
-                    ray.r_direction = .{ 1.0 / ray.direction[0], 1.0 / ray.direction[1], 1.0 / ray.direction[2] };
-                    ray.t = 1.0e+30;
+                while (x < width) : (x += 4) {
+                    var v: u32 = 0;
+                    while (v < 4) : (v += 1) {
+                        var u: u32 = 0;
+                        while (u < 4) : (u += 1) {
+                            const pixel_pos = calculatePixelPosition(ray.origin, p0, p1, p2, x + u, y + v, width, height);
+                            ray.direction = float3Normalize(float3Sub(pixel_pos, ray.origin));
+                            ray.r_direction = .{ 1.0 / ray.direction[0], 1.0 / ray.direction[1], 1.0 / ray.direction[2] };
+                            ray.t = 1.0e+30;
 
-                    const intersect_tracy_zone = ztracy.ZoneNC(@src(), intersect_marker, 0x00_00_ff_00);
-                    bvh_app.intersectBVH(&ray, bvh_app.root_node_index);
-                    intersect_tracy_zone.End();
+                            const intersect_tracy_zone = ztracy.ZoneNC(@src(), intersect_marker, 0x00_00_ff_00);
+                            bvh_app.intersectBVH(&ray, bvh_app.root_node_index);
+                            intersect_tracy_zone.End();
 
-                    if (ray.t < 1.0e+30) {
-                        const pixels_color_tracy_zone = ztracy.ZoneNC(@src(), pixel_color_marker, 0x00_ff_00_00);
-                        defer pixels_color_tracy_zone.End();
+                            if (ray.t < 1.0e+30) {
+                                const pixels_color_tracy_zone = ztracy.ZoneNC(@src(), pixel_color_marker, 0x00_ff_00_00);
+                                defer pixels_color_tracy_zone.End();
 
-                        var d = @floatToInt(u32, (1.0 - ray.t * inv_far_plane) * 255.99);
-                        var color: u32 = 0xff000000;
-                        color |= d << 0;
-                        color |= d << 8;
-                        color |= d << 16;
-                        setPixelColor(surface, x, y, color);
+                                var d = @floatToInt(u32, (1.0 - ray.t * inv_far_plane) * 255.99);
+                                var color: u32 = 0xff000000;
+                                color |= d << 0;
+                                color |= d << 8;
+                                color |= d << 16;
+                                setPixelColor(surface, x + u, y + v, color);
+                            }
+                        }
                     }
                 }
             }
@@ -575,7 +597,7 @@ pub fn main() anyerror!void {
         const end = std.time.milliTimestamp();
         const elapsed: f32 = @intToFloat(f32, end - start);
 
-        std.log.debug("tracing time: {d:.2}ms ({d:2.2}M rays/s)", .{elapsed, @intToFloat(f32, width * height) / elapsed / 1000});
+        print("tracing time: {d:.2}ms ({d:2.2}M rays/s)", .{elapsed, @intToFloat(f32, width * height) / elapsed / 1000});
 
         var texture = c.SDL_CreateTextureFromSurface(renderer, surface);
         _ = c.SDL_RenderCopy(renderer, texture, null, &texture_rect);
@@ -586,9 +608,12 @@ pub fn main() anyerror!void {
 }
 
 fn calculatePixelPosition(origin: [3]f32, p0: [3]f32, p1: [3]f32, p2: [3]f32, x: u32, y: u32, width: u32, height: u32) [3]f32 {
-    return float3Add(origin, float3Add(p0, float3Add(
-        float3MulScalar(float3Sub(p1, p0), (@intToFloat(f32, x) / @intToFloat(f32, width))),
-        float3MulScalar(float3Sub(p2, p0), @intToFloat(f32, y) / @intToFloat(f32, height)))));
+    var a = float3Sub(p1, p0);
+    var b = float3Sub(p2, p0);
+    var w = @intToFloat(f32, x) / @intToFloat(f32, width);
+    var h = @intToFloat(f32, y) / @intToFloat(f32, height);
+
+    return float3Add(float3Add(origin, p0), float3Add(float3MulScalar(a, w), float3MulScalar(b, h)));
 }
 
 fn setPixelColor(surface: *c.SDL_Surface, x: u32, y: u32, pixel: u32) void {
