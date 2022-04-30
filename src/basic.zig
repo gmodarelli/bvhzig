@@ -63,6 +63,12 @@ const BVHNode = struct {
     pub fn is_leaf(node: *BVHNode) bool {
         return node.tri_count > 0;
     }
+
+    pub fn calculateNodeCost(node: *BVHNode) f32 {
+        const e = float3Sub(node.aabb_max, node.aabb_min);
+        const area = e[0] * e[1] + e[1] * e[2] + e[2] * e[0];
+        return @intToFloat(f32, node.tri_count) * area;
+    }
 };
 
 const Ray = struct {
@@ -363,39 +369,19 @@ const BasicBVHApp = struct {
         var node = &app.bvh_nodes[node_index];
 
         // Determine split axis using SAH
-        var best_axis: u32 = 0xffffffff;
-        var best_pos: f32 = 0;
-        var best_cost: f32 = 1.0e+30;
         var axis: u32 = 0;
-        while (axis < 3) : (axis += 1) {
-            var i: u32 = 0;
-            while (i < node.tri_count) : (i += 1) {
-                const triangle = &app.triangles[app.triangle_indices[node.left_first + i]];
-                const candidate_pos = triangle.centroid[axis];
-                var cost: f32 = app.evaluateSAH(node, axis, candidate_pos);
-
-                if (cost < best_cost) {
-                    best_pos = candidate_pos;
-                    best_axis = axis;
-                    best_cost = cost;
-                }
-            }
-        }
+        var split_pos: f32 = 0;
+        var split_cost = app.findBestSplitPlane(node, &axis, &split_pos);
 
         // Calculate parent cost to terminate recursion
-        const parent_extent = float3Sub(node.aabb_max, node.aabb_min);
-        const parent_area = parent_extent[0] * parent_extent[1] + parent_extent[1] * parent_extent[2] + parent_extent[2] * parent_extent[0];
-        const parent_cost = @intToFloat(f32, node.tri_count) * parent_area;
+        const nosplit_cost = node.calculateNodeCost();
 
-        if (best_cost >= parent_cost) {
+        if (split_cost >= nosplit_cost) {
             return;
         }
 
-        std.debug.assert(best_axis >= 0 and best_axis < 3);
-        std.debug.assert(best_cost < 1.0e+30);
-
-        axis = best_axis;
-        var split_pos: f32 = best_pos;
+        std.debug.assert(axis >= 0 and axis < 3);
+        std.debug.assert(split_cost < 1.0e+30);
 
         // In-place partition
         var i: u32 = node.left_first;
@@ -440,6 +426,27 @@ const BasicBVHApp = struct {
         // Recourse
         app.subdivide(left_child_idx);
         app.subdivide(right_child_idx);
+    }
+
+    fn findBestSplitPlane(app: *BasicBVHApp, node: *BVHNode, axis: *u32, split_pos: *f32) f32 {
+        var best_cost: f32 = 1.0e+30;
+        var a: u32 = 0;
+        while (a < 3) : (a += 1) {
+            var i: u32 = 0;
+            while (i < node.tri_count) : (i += 1) {
+                const triangle = &app.triangles[app.triangle_indices[node.left_first + i]];
+                const candidate_pos = triangle.centroid[a];
+                var cost: f32 = app.evaluateSAH(node, a, candidate_pos);
+
+                if (cost < best_cost) {
+                    split_pos.* = candidate_pos;
+                    axis.* = a;
+                    best_cost = cost;
+                }
+            }
+        }
+
+        return best_cost;
     }
 
     pub fn evaluateSAH(app: *BasicBVHApp, node: *BVHNode, axis: u32, pos: f32) f32 {
