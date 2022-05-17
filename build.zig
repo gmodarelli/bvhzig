@@ -19,7 +19,7 @@ pub fn build(b: *std.build.Builder) void {
     const exe_options = b.addOptions();
     exe_options.addOption(bool, "enable_tracy", enable_tracy);
 
-    const exe = b.addExecutable("basic", "src/basic.zig");
+    const exe = b.addExecutable("main", "src/main.zig");
     exe.setTarget(target);
     exe.setBuildMode(mode);
     exe.addOptions("build_options", exe_options);

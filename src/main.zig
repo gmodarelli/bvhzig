@@ -165,25 +165,29 @@ pub fn intersectAABB(ray: *Ray, bmin: [3]f32, bmax: [3]f32) f32 {
     return 1.0e+30;
 }
 
-
 const BasicBVHApp = struct {
     num_triangles: u32 = 0,
     triangles: []Tri,
+    original: []Tri,
     triangle_indices: []u32,
     bvh_nodes: []BVHNode,
     root_node_index: u32 = 0,
     node_used: u32 = 1,
+    r: f32 = 0,
 
     pub fn init(allocator: std.mem.Allocator) BasicBVHApp {
         var app: BasicBVHApp = undefined;
         app.root_node_index = 0;
         app.node_used = 1;
 
-        // app.generateRandomTriangleSoup(allocator);
         app.loadTrianglesFromMesh(allocator) catch unreachable;
 
+        std.debug.assert(app.num_triangles > 0);
+        app.bvh_nodes = allocator.alloc(BVHNode, app.num_triangles * 2) catch unreachable;
+
         const start = std.time.milliTimestamp();
-        app.buildBVH(allocator);
+        app.animate();
+        app.buildBVH();
         const end = std.time.milliTimestamp();
         const elapsed: f32 = @intToFloat(f32, end - start);
         print("BVH build time: {d:.2}ms", .{elapsed});
@@ -193,40 +197,16 @@ const BasicBVHApp = struct {
 
     pub fn deinit(app: *BasicBVHApp, allocator: std.mem.Allocator) void {
         allocator.free(app.triangles);
+        allocator.free(app.original);
         allocator.free(app.triangle_indices);
         allocator.free(app.bvh_nodes);
-    }
-
-    fn generateRandomTriangleSoup(app: *BasicBVHApp, allocator: std.mem.Allocator) void {
-        app.num_triangles = 64;
-
-        app.triangles = allocator.alloc(Tri, app.num_triangles) catch unreachable;
-        app.triangle_indices = allocator.alloc(u32, app.num_triangles) catch unreachable;
-
-        var prng = std.rand.DefaultPrng.init(0x12345678);
-        const random = prng.random();
-
-        var i: u32 = 0;
-        while (i < app.num_triangles) : (i += 1) {
-            var r0: [3]f32 = .{ random.float(f32), random.float(f32), random.float(f32) };
-            var r1: [3]f32 = .{ random.float(f32), random.float(f32), random.float(f32) };
-            var r2: [3]f32 = .{ random.float(f32), random.float(f32), random.float(f32) };
-
-            var triangle: Tri = undefined;
-        
-            triangle.vertex0 = float3Sub(float3MulScalar(r0, 9), .{ 5.0, 5.0, 5.0 });
-            triangle.vertex1 = float3Add(triangle.vertex0, r1);
-            triangle.vertex2 = float3Add(triangle.vertex0, r2);
-
-            app.triangles[i] = triangle;
-        }
     }
 
     fn loadTrianglesFromMesh(app: *BasicBVHApp, allocator: std.mem.Allocator) !void {
         const start = std.time.milliTimestamp();
 
         const dir = std.fs.cwd();
-        var file = try dir.openFile("content/unity.tri", .{ .mode = .read_only });
+        var file = try dir.openFile("content/bigben.tri", .{ .mode = .read_only });
 
         var reader = file.reader();
         var buffer: [512]u8 = undefined;
@@ -237,10 +217,11 @@ const BasicBVHApp = struct {
         file.close();
 
         app.triangles = allocator.alloc(Tri, app.num_triangles) catch unreachable;
+        app.original = allocator.alloc(Tri, app.num_triangles) catch unreachable;
         app.triangle_indices = allocator.alloc(u32, app.num_triangles) catch unreachable;
 
         // TODO: Figure out a way to rewind the file reader instead of re-opening the file again
-        file = try dir.openFile("content/unity.tri", .{ .mode = .read_only });
+        file = try dir.openFile("content/bigben.tri", .{ .mode = .read_only });
         defer file.close();
         reader = file.reader();
         var i: u32 = 0;
@@ -260,12 +241,41 @@ const BasicBVHApp = struct {
             triangle.vertex2[1] = try std.fmt.parseFloat(f32, it.next().?);
             triangle.vertex2[2] = try std.fmt.parseFloat(f32, it.next().?);
 
-            app.triangles[i] = triangle;
+            app.original[i] = triangle;
             i += 1;
         }
         const end = std.time.milliTimestamp();
         const elapsed: f32 = @intToFloat(f32, end - start);
         print("Mesh loaded in {d:.2}ms", .{elapsed});
+    }
+
+    pub fn animate(bvh: *BasicBVHApp) void {
+        bvh.r += 0.05;
+        if (bvh.r > 2.0 * math.pi) {
+            bvh.r = bvh.r - 2 * math.pi;
+        }
+
+        const a: f32 = @sin(bvh.r) * 0.5;
+        var i: u32 = 0;
+        while (i < bvh.num_triangles) : (i += 1) {
+            var v = bvh.original[i].vertex0;
+            var s: f32 = a * (v[1] - 0.2) * 0.2;
+            var x: f32 = v[0] * @cos(s) - v[1] * @sin(s);
+            var y: f32 = v[0] * @sin(s) + v[1] * @cos(s);
+            bvh.triangles[i].vertex0 = .{ x, y, v[2] };
+
+            v = bvh.original[i].vertex1;
+            s = a * (v[1] - 0.2) * 0.2;
+            x = v[0] * @cos(s) - v[1] * @sin(s);
+            y = v[0] * @sin(s) + v[1] * @cos(s);
+            bvh.triangles[i].vertex1 = .{ x, y, v[2] };
+
+            v = bvh.original[i].vertex2;
+            s = a * (v[1] - 0.2) * 0.2;
+            x = v[0] * @cos(s) - v[1] * @sin(s);
+            y = v[0] * @sin(s) + v[1] * @cos(s);
+            bvh.triangles[i].vertex2 = .{ x, y, v[2] };
+        }
     }
 
     pub fn intersectBVH(bvh: *BasicBVHApp, ray: *Ray, node_index: u32) void {
@@ -320,13 +330,8 @@ const BasicBVHApp = struct {
         }
     }
 
-    fn buildBVH(app: *BasicBVHApp, allocator: std.mem.Allocator) void {
-        std.debug.assert(app.num_triangles > 0);
-        app.bvh_nodes = allocator.alloc(BVHNode, app.num_triangles * 2) catch unreachable;
-
-        std.debug.assert(app.num_triangles > 0);
-        std.debug.assert(app.root_node_index == 0);
-        std.debug.assert(app.node_used == 1);
+    fn buildBVH(app: *BasicBVHApp) void {
+        app.node_used = 1;
 
         // Populate triangle index array
         var i: u32 = 0;
@@ -353,6 +358,25 @@ const BasicBVHApp = struct {
 
         // Subdivide recursively
         app.subdivide(app.root_node_index);
+    }
+
+    fn refitBVH(app: *BasicBVHApp) void {
+        var i: i32 = @intCast(i32, app.node_used - 1);
+        while (i >= 0) : (i -= 1) {
+            var node = &app.bvh_nodes[@intCast(u32, i)];
+            if (node.is_leaf()) {
+                // Leaf node: adjust bounds to contained triangles
+                app.updateNodeBounds(@intCast(u32, i));
+                continue;
+            }
+
+            // interior node: adjust bounds to child node bounds
+            var left_child = &app.bvh_nodes[node.left_first];
+            var right_child = &app.bvh_nodes[node.left_first + 1];
+
+            node.aabb_min = float3Min(left_child.aabb_min, right_child.aabb_min);
+            node.aabb_max = float3Max(left_child.aabb_max, right_child.aabb_max);
+        }
     }
 
     fn updateNodeBounds(app: *BasicBVHApp, node_index: u32) void {
@@ -604,7 +628,6 @@ pub fn main() anyerror!void {
     const intersect_marker = "intersect BVH";
 
     mainloop: while (true) {
-
         var sdl_event: c.SDL_Event = undefined;
         while (c.SDL_PollEvent(&sdl_event) != 0) {
             switch (sdl_event.type) {
@@ -623,44 +646,45 @@ pub fn main() anyerror!void {
         const p1: [3]f32 = .{ 1, 1, 2 };
         const p2: [3]f32 = .{ -1, -1, 2 };
         var ray: Ray = undefined;
-        ray.origin = .{ -1.5, -0.2, -2.5 };
+        ray.origin = .{ 0, 3.5, -4.5 };
 
         const start = std.time.milliTimestamp();
 
-        var y: u32 = 0;
-        const inv_far_plane: f32 = 1.0 / 5.0;
+        bvh_app.animate();
+        bvh_app.refitBVH();
 
         {
             const pixels_loop_tracy_zone = ztracy.ZoneNC(@src(), pixel_loop_marker, 0x00_ff_00_00);
             defer pixels_loop_tracy_zone.End();
 
-            while (y < height) : (y += 4) {
-                var x: u32 = 0;
-                while (x < width) : (x += 4) {
-                    var v: u32 = 0;
-                    while (v < 4) : (v += 1) {
-                        var u: u32 = 0;
-                        while (u < 4) : (u += 1) {
-                            const pixel_pos = calculatePixelPosition(ray.origin, p0, p1, p2, x + u, y + v, width, height);
-                            ray.direction = float3Normalize(float3Sub(pixel_pos, ray.origin));
-                            ray.r_direction = .{ 1.0 / ray.direction[0], 1.0 / ray.direction[1], 1.0 / ray.direction[2] };
-                            ray.t = 1.0e+30;
+            var tile: u32 = 0;
+            while (tile < 6400) : (tile += 1) {
+                var x: u32 = tile % 80;
+                var y: u32 = tile / 80;
+                var v: u32 = 0;
+                while (v < 8) : (v += 1) {
+                    var u: u32 = 0;
+                    while (u < 8) : (u += 1) {
+                        const pixel_pos = calculatePixelPosition(ray.origin, p0, p1, p2, x * 8 + u, y * 8 + v, width, height);
+                        ray.direction = float3Normalize(float3Sub(pixel_pos, ray.origin));
+                        ray.r_direction = .{ 1.0 / ray.direction[0], 1.0 / ray.direction[1], 1.0 / ray.direction[2] };
+                        ray.t = 1.0e+30;
 
-                            const intersect_tracy_zone = ztracy.ZoneNC(@src(), intersect_marker, 0x00_00_ff_00);
-                            bvh_app.intersectBVH(&ray, bvh_app.root_node_index);
-                            intersect_tracy_zone.End();
+                        const intersect_tracy_zone = ztracy.ZoneNC(@src(), intersect_marker, 0x00_00_ff_00);
+                        bvh_app.intersectBVH(&ray, bvh_app.root_node_index);
+                        intersect_tracy_zone.End();
 
-                            if (ray.t < 1.0e+30) {
-                                const pixels_color_tracy_zone = ztracy.ZoneNC(@src(), pixel_color_marker, 0x00_ff_00_00);
-                                defer pixels_color_tracy_zone.End();
+                        if (ray.t < 1.0e+30) {
+                            const pixels_color_tracy_zone = ztracy.ZoneNC(@src(), pixel_color_marker, 0x00_ff_00_00);
+                            defer pixels_color_tracy_zone.End();
 
-                                var d = @floatToInt(u32, (1.0 - ray.t * inv_far_plane) * 255.99);
-                                var color: u32 = 0xff000000;
-                                color |= d << 0;
-                                color |= d << 8;
-                                color |= d << 16;
-                                setPixelColor(surface, x + u, y + v, color);
-                            }
+                            var d = 255 - @floatToInt(u32, (ray.t - 4) * 180);
+                            // var d: u32 = 255;
+                            var color: u32 = 0xff000000;
+                            color |= d << 0;
+                            color |= d << 8;
+                            color |= d << 16;
+                            setPixelColor(surface, x * 8 + u, y * 8 + v, color);
                         }
                     }
                 }
